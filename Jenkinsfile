@@ -15,6 +15,7 @@ pipeline {
     APP_HOST = '172.31.9.216'   // private IP (same VPC)
     APP_USER = 'ubuntu'
     APP_DIR  = '/opt/paylanka-nano'
+    PRIVATE_KEY = '''ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFSZum3ih+i0WrRNJoJPX8qPcMMRV275nUQYvXUDV8oa jenkins@appvm'''
   }
 
   stages {
@@ -52,58 +53,46 @@ docker logout || true
       }
     }
 
-    stage('Deploy to App VM') {
+    stages {
+    stage('Deploy to App VM (manual key)') {
       steps {
-        withCredentials([
-          // Create this in Jenkins: “SSH Username with private key”, ID: appvm-ssh
-          sshUserPrivateKey(credentialsId: 'appvm-ssh', keyFileVariable: 'DUMMY', usernameVariable: 'DUMMYU'),
-          usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')
-        ]) {
-          // Use sshagent so we don't leak/mask -i paths
-          sshagent(credentials: ['appvm-ssh']) {
-            sh '''#!/bin/bash
-set -euxo pipefail
+        sh '''#!/bin/bash
+          set -eux
 
-# quick sanity check
-ssh -o StrictHostKeyChecking=accept-new "${APP_USER}@${APP_HOST}" "hostname && whoami"
+          # Write key to temporary file
+          KEY_FILE=$(mktemp)
+          echo "$PRIVATE_KEY" > $KEY_FILE
+          chmod 600 $KEY_FILE
 
-# 1) write docker-compose.yml on REMOTE with local expansion of vars
-ssh -o StrictHostKeyChecking=accept-new "${APP_USER}@${APP_HOST}" "sudo mkdir -p '${APP_DIR}' && sudo chown ${APP_USER}:${APP_USER} '${APP_DIR}'"
-ssh -o StrictHostKeyChecking=accept-new "${APP_USER}@${APP_HOST}" "cat > '${APP_DIR}/docker-compose.yml' <<EOF
+          # Check connectivity
+          ssh -i $KEY_FILE -o StrictHostKeyChecking=accept-new $APP_USER@$APP_HOST "hostname && whoami"
+
+          # Deploy your stack
+          ssh -i $KEY_FILE -o StrictHostKeyChecking=accept-new $APP_USER@$APP_HOST bash -lc "
+            sudo mkdir -p $APP_DIR
+            sudo tee $APP_DIR/docker-compose.yml >/dev/null <<'EOF'
 version: '3.9'
 services:
   api:
-    image: ${API_IMG}:latest
+    image: dinithan/paylanka-nano-api:latest
     container_name: paylanka-nano-api-1
-    restart: unless-stopped
     ports: ['8000:8000']
-    healthcheck:
-      test: ['CMD-SHELL','wget -qO- http://localhost:8000/health || exit 1']
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
   web:
-    image: ${WEB_IMG}:latest
+    image: dinithan/paylanka-nano-web:latest
     container_name: paylanka-nano-web-1
-    restart: unless-stopped
     depends_on:
       api:
         condition: service_healthy
     ports: ['80:80']
-EOF"
+EOF
+            cd $APP_DIR && sudo docker compose up -d
+          "
 
-# 2) docker login on REMOTE (secret piped over SSH)
-printf '%s\n' "${DH_PASS}" | ssh -o StrictHostKeyChecking=accept-new "${APP_USER}@${APP_HOST}" \
-  "docker login -u '${DH_USER}' --password-stdin"
-
-# 3) pull & up on REMOTE
-ssh -o StrictHostKeyChecking=accept-new "${APP_USER}@${APP_HOST}" "cd '${APP_DIR}' && docker compose pull && docker compose up -d && docker image prune -f || true"
-'''
-          }
-        }
+          rm -f $KEY_FILE
+        '''
       }
     }
+
 
     stage('Health Check') {
       steps {
