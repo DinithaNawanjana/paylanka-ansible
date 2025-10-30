@@ -43,39 +43,37 @@ pipeline {
     }
 
     stage('Deploy to App VM') {
-      steps {
-        sshagent(credentials: ['appvm-ssh-key']) {
-          sh """
-            ssh -o StrictHostKeyChecking=accept-new ${APP_USER}@${APP_HOST} '
-              set -e
-              mkdir -p ${APP_DIR} && cd ${APP_DIR}
-              cat > docker-compose.yml <<EOF2
-              name: paylanka-nano
-              services:
-                api:
-                  image: ${API_IMG}:latest
-                  environment: [ "PORT=8000" ]
-                  healthcheck:
-                    test: ["CMD-SHELL","wget -qO- http://localhost:8000/health || exit 1"]
-                    interval: 5s
-                    timeout: 3s
-                    retries: 20
-                  networks: [appnet]
-                web:
-                  image: ${WEB_IMG}:latest
-                  depends_on:
-                    api: { condition: service_healthy }
-                  ports: ["80:80"]
-                  networks: [appnet]
-              networks: { appnet: {} }
-              EOF2
-              docker compose pull
-              docker compose up -d
-            '
-          """
-        }
-      }
+  steps {
+    sshagent(credentials: ['appvm-ssh']) {
+      sh '''
+        set -e
+        APP_HOST=172.31.9.216
+
+        # Pull newest images on the app VM and (re)start containers
+        ssh -o StrictHostKeyChecking=accept-new ubuntu@$APP_HOST '
+          docker login -u dinithan -p "$DH_PASS"
+          docker pull dinithan/paylanka-nano-api:${VERSION:-latest}
+          docker pull dinithan/paylanka-nano-web:${VERSION:-latest}
+
+          # stop old containers (ignore errors if not present)
+          docker rm -f paylanka-nano-api-1 paylanka-nano-web-1 2>/dev/null || true
+
+          # run API (example)
+          docker run -d --name paylanka-nano-api-1 \
+            -p 8000:8000 \
+            dinithan/paylanka-nano-api:${VERSION:-latest}
+
+          # run Web
+          docker run -d --name paylanka-nano-web-1 \
+            -p 80:80 \
+            --link paylanka-nano-api-1:api \
+            dinithan/paylanka-nano-web:${VERSION:-latest}
+        '
+      '''
     }
+  }
+}
+
 
     stage('Health Check') {
       steps {
