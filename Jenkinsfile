@@ -13,7 +13,6 @@ pipeline {
   stages {
     stage('Checkout') {
       steps {
-        // Repo is public; you can remove credentialsId to silence the warning
         git branch: 'main',
             url: 'https://github.com/DinithaNawanjana/paylanka-nano.git'
       }
@@ -43,24 +42,17 @@ pipeline {
       }
     }
 
-    stage('Checkout') {
-  steps {
-    git branch: 'main',
-        url: 'https://github.com/DinithaNawanjana/paylanka-nano.git'
-  }
-}
+    stage('Deploy to App VM') {
+      steps {
+        withCredentials([
+          usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS'),
+          sshUserPrivateKey(credentialsId: 'appvm-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')
+        ]) {
+          sh '''
+            set -euo pipefail
 
-stage('Deploy to App VM') {
-  steps {
-    withCredentials([
-      usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS'),
-      sshUserPrivateKey(credentialsId: 'appvm-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')
-    ]) {
-      sh '''
-        set -euo pipefail
-
-        # build compose locally so vars expand here
-        cat > docker-compose.yml <<EOF
+            # Build compose locally so env vars expand here
+            cat > docker-compose.yml <<EOF
 version: "3.9"
 services:
   api:
@@ -84,41 +76,41 @@ services:
       - "80:80"
 EOF
 
-        # sanity ssh
-        ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
-            -i "$SSH_KEY" "$SSH_USER@${APP_HOST}" "hostname && whoami"
+            # Smoke SSH
+            ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+                -i "$SSH_KEY" "$SSH_USER@${APP_HOST}" "hostname && whoami"
 
-        # copy compose
-        scp -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -i "$SSH_KEY" \
-            docker-compose.yml "$SSH_USER@${APP_HOST}:/tmp/docker-compose.yml"
+            # Copy compose
+            scp -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -i "$SSH_KEY" \
+                docker-compose.yml "$SSH_USER@${APP_HOST}:/tmp/docker-compose.yml"
 
-        # deploy remotely
-        ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
-            -i "$SSH_KEY" "$SSH_USER@${APP_HOST}" bash -lc '
-          set -euo pipefail
-          mkdir -p ~/paylanka-nano
-          mv /tmp/docker-compose.yml ~/paylanka-nano/docker-compose.yml
-          echo "${DH_PASS}" | docker login -u "${DH_USER}" --password-stdin
-          docker compose -f ~/paylanka-nano/docker-compose.yml pull
-          docker compose -f ~/paylanka-nano/docker-compose.yml up -d
-          curl -fsS http://localhost/api/health
-        '
-      '''
+            # Deploy remotely (use sudo in case ubuntu isn't in docker group)
+            ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+                -i "$SSH_KEY" "$SSH_USER@${APP_HOST}" bash -lc '
+              set -euo pipefail
+              sudo mkdir -p /opt/paylanka-nano
+              sudo mv /tmp/docker-compose.yml /opt/paylanka-nano/docker-compose.yml
+              echo "${DH_PASS}" | sudo docker login -u "${DH_USER}" --password-stdin
+              sudo docker compose -f /opt/paylanka-nano/docker-compose.yml pull
+              sudo docker compose -f /opt/paylanka-nano/docker-compose.yml up -d
+              curl -fsS http://localhost/api/health || curl -fsS http://localhost:8000/health
+            '
+          '''
+        }
+      }
+    }
+
+    stage('Health Check (from Jenkins)') {
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'appvm-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
+          sh '''
+            ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+                -i "$SSH_KEY" "$SSH_USER@${APP_HOST}" "curl -fsS http://localhost/api/health || curl -fsS http://localhost:8000/health"
+          '''
+        }
+      }
     }
   }
-}
-
-
-stage('Health Check (from Jenkins)') {
-  steps {
-    withCredentials([sshUserPrivateKey(credentialsId: 'appvm-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
-      sh '''
-        ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
-            -i "$SSH_KEY" "$SSH_USER@${APP_HOST}" "curl -fsS http://localhost/api/health"
-      '''
-    }
-  }
-}
 
   post {
     success { echo "✅ Deployment successful! Visit: http://${APP_HOST}" }
