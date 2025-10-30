@@ -1,0 +1,35 @@
+name: paylanka-nano
+services:
+  api:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+    image: dinithan/nano-api:latest
+    environment:
+      - PORT=8000
+      - APP_NAME=PayLanka Nano API
+    expose:
+      - "8000"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [appnet]
+
+  web:
+    build:
+      context: ./services/web
+      dockerfile: Dockerfile
+    image: dinithan/nano-web:latest
+    ports:
+      - "5000:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [appnet]
+
+networks:
+  appnet:

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>PayLanka Nano</title>
+<link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <div>
+        <h1>PayLanka Nano Service</h1>
+        <p class="mut">Tiny payment demo • Proxy on port 5000</p>
+      </div>
+      <div class="actions">
+        <button id="ping" class="btn ghost">API Health</button>
+        <button id="refresh" class="btn ghost">Refresh</button>
+        <button id="clear" class="btn ghost danger">Clear</button>
+      </div>
+    </header>
+
+    <section class="grid">
+      <div class="card">
+        <h3>Quick Pay</h3>
+        <form id="payForm" class="form">
+          <div class="row">
+            <label>Amount</label>
+            <input type="number" min="1" step="1" id="amount" placeholder="1500" required>
+          </div>
+          <div class="row">
+            <label>Currency</label>
+            <select id="currency">
+              <option selected>LKR</option><option>USD</option><option>EUR</option><option>INR</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>Card Number</label>
+            <input id="card" maxlength="19" placeholder="4242424242424242" required>
+          </div>
+          <div class="row two">
+            <div>
+              <label>Expiry (MM/YY)</label>
+              <input id="exp" maxlength="5" placeholder="12/28" required>
+            </div>
+            <div>
+              <label>CVC</label>
+              <input id="cvc" maxlength="4" placeholder="123" required>
+            </div>
+          </div>
+          <button class="btn" type="submit">Pay</button>
+          <div id="msg" class="msg"></div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h3>Last Payment</h3>
+        <div id="last"><div class="mut">No payments yet.</div></div>
+      </div>
+
+      <div class="card table-card">
+        <h3>All Payments</h3>
+        <div class="table-wrap">
+          <table class="table" id="payments">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>ID</th>
+                <th>Amount</th>
+                <th>Card</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="paymentsBody">
+              <tr><td colspan="5" class="mut">No data</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <footer>© PayLanka Nano • Demo only</footer>
+  </div>
+<script src="app.js"></script>
+</body>
+</html>
