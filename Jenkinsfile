@@ -44,35 +44,55 @@ pipeline {
 
     stage('Deploy to App VM') {
   steps {
-    sshagent(credentials: ['appvm-ssh']) {
+    withCredentials([
+      sshUserPrivateKey(credentialsId: 'appvm-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER'),
+      usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')
+    ]) {
       sh '''
-        set -e
+        set -euxo pipefail
         APP_HOST=172.31.9.216
 
-        # Pull newest images on the app VM and (re)start containers
-        ssh -o StrictHostKeyChecking=accept-new ubuntu@$APP_HOST '
-          docker login -u dinithan -p "$DH_PASS"
-          docker pull dinithan/paylanka-nano-api:${VERSION:-latest}
-          docker pull dinithan/paylanka-nano-web:${VERSION:-latest}
+        # sanity: show who we are & reachability
+        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new "$SSH_USER@$APP_HOST" "hostname && whoami"
 
-          # stop old containers (ignore errors if not present)
-          docker rm -f paylanka-nano-api-1 paylanka-nano-web-1 2>/dev/null || true
+        # Deploy (compose file lives on the VM; create/update it and run)
+        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new "$SSH_USER@$APP_HOST" bash -lc "
+          set -euxo pipefail
+          sudo mkdir -p /opt/paylanka-nano
+          sudo tee /opt/paylanka-nano/docker-compose.yml >/dev/null <<'EOF'
+          version: '3.9'
+          services:
+            api:
+              image: dinithan/paylanka-nano-api:latest
+              container_name: paylanka-nano-api-1
+              ports: ['8000:8000']
+              healthcheck:
+                test: ['CMD-SHELL','wget -qO- http://localhost:8000/health || exit 1']
+                interval: 5s
+                timeout: 3s
+                retries: 20
+            web:
+              image: dinithan/paylanka-nano-web:latest
+              container_name: paylanka-nano-web-1
+              depends_on:
+                api:
+                  condition: service_healthy
+              ports: ['80:80']
+          EOF
 
-          # run API (example)
-          docker run -d --name paylanka-nano-api-1 \
-            -p 8000:8000 \
-            dinithan/paylanka-nano-api:${VERSION:-latest}
+          # docker login for pulls (uses your Jenkins creds)
+          echo '${DH_PASS}' | sudo docker login -u '${DH_USER}' --password-stdin
 
-          # run Web
-          docker run -d --name paylanka-nano-web-1 \
-            -p 80:80 \
-            --link paylanka-nano-api-1:api \
-            dinithan/paylanka-nano-web:${VERSION:-latest}
-        '
+          # pull & up
+          cd /opt/paylanka-nano
+          sudo docker compose pull
+          sudo docker compose up -d
+        "
       '''
     }
   }
 }
+
 
 
     stage('Health Check') {
