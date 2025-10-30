@@ -47,18 +47,16 @@ pipeline {
     }
 
     stage('Deploy to App VM') {
-      steps {
-        withCredentials([usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
-          // Use ssh-agent so we don't hit "Load key ... error in libcrypto"
-          sshagent(credentials: ['appvm-ssh-key']) {
-            sh """
-              set -e
-              ssh -o StrictHostKeyChecking=accept-new ${APP_USER}@${APP_HOST} "hostname && whoami"
-
-              ssh -o StrictHostKeyChecking=accept-new ${APP_USER}@${APP_HOST} bash -lc '
-                set -e
-                sudo mkdir -p /opt/paylanka-nano
-                cat > /opt/paylanka-nano/docker-compose.yml <<EOF
+  steps {
+    withCredentials([usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
+      sshagent(credentials: ['appvm-ssh-key']) {
+        sh '''
+          set -e
+          ssh -o StrictHostKeyChecking=accept-new ${APP_USER}@${APP_HOST} "hostname && whoami"
+          ssh -o StrictHostKeyChecking=accept-new ${APP_USER}@${APP_HOST} bash -lc '
+            set -e
+            sudo mkdir -p /opt/paylanka-nano
+            cat > /opt/paylanka-nano/docker-compose.yml <<EOF
 version: "3.9"
 services:
   api:
@@ -78,16 +76,17 @@ services:
         condition: service_healthy
     ports: ["80:80"]
 EOF
-                echo "${'$'}{DH_PASS}" | sudo docker login -u "${'$'}{DH_USER}" --password-stdin
-                sudo docker compose -f /opt/paylanka-nano/docker-compose.yml pull
-                sudo docker compose -f /opt/paylanka-nano/docker-compose.yml up -d
-                curl -fsS http://localhost/api/health
-              '
-            """
-          }
-        }
+            echo "${DH_PASS}" | sudo docker login -u "${DH_USER}" --password-stdin
+            sudo docker compose -f /opt/paylanka-nano/docker-compose.yml pull
+            sudo docker compose -f /opt/paylanka-nano/docker-compose.yml up -d
+            curl -fsS http://localhost/api/health
+          '
+        '''
       }
     }
+  }
+}
+
 
     stage('Health Check (from Jenkins)') {
       steps {
