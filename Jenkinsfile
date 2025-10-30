@@ -48,8 +48,8 @@ pipeline {
       sshUserPrivateKey(credentialsId: 'appvm-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER'),
       usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')
     ]) {
-      sh '''
-        set -euxo pipefail
+      sh '''#!/bin/bash
+	set -euxo pipefail
         APP_HOST=172.31.9.216
 
         # sanity: show who we are & reachability
