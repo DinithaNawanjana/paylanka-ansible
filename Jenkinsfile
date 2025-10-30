@@ -6,25 +6,22 @@ pipeline {
     DOCKER_USER = 'dinithan'
     API_IMG     = "${DOCKER_USER}/paylanka-nano-api"
     WEB_IMG     = "${DOCKER_USER}/paylanka-nano-web"
-    APP_HOST    = '172.31.9.216'    // your App VM private IP
+    APP_HOST    = '172.31.9.216'
     APP_USER    = 'ubuntu'
-    PRIVATE_KEY = '''ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFSZum3ih+i0WrRNJoJPX8qPcMMRV275nUQYvXUDV8oa jenkins@appvm'''
   }
 
   stages {
     stage('Checkout') {
       steps {
+        // Repo is public; you can remove credentialsId to silence the warning
         git branch: 'main',
-            url: 'https://github.com/DinithaNawanjana/paylanka-nano.git',
-            credentialsId: 'github-https'
+            url: 'https://github.com/DinithaNawanjana/paylanka-nano.git'
       }
     }
 
     stage('Docker Build + Tag') {
       steps {
-        script {
-          env.TAG = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-        }
+        script { env.TAG = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim() }
         sh """
           docker build -t ${API_IMG}:${TAG} -t ${API_IMG}:latest services/api
           docker build -t ${WEB_IMG}:${TAG} -t ${WEB_IMG}:latest services/web
@@ -47,31 +44,31 @@ pipeline {
     }
 
     stage('Deploy to App VM') {
-  steps {
-    withCredentials([
-      usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS'),
-      sshUserPrivateKey(credentialsId: 'appvm-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')
-    ]) {
-      sh '''
-        set -e
-        APP_HOST=172.31.9.216
+      steps {
+        withCredentials([
+          usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS'),
+          sshUserPrivateKey(credentialsId: 'appvm-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')
+        ]) {
+          sh """
+            set -e
+            APP_HOST=${APP_HOST}
 
-        # Sanity: can SSH using the key file directly (no ssh-agent)
-        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new "$SSH_USER@$APP_HOST" "hostname && whoami"
+            # sanity: direct key file (avoid ssh-agent/libcrypto issues)
+            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=accept-new "\$SSH_USER@${APP_HOST}" "hostname && whoami"
 
-        # Write compose on VM and deploy
-        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new "$SSH_USER@$APP_HOST" bash -lc '
-          set -e
-          sudo mkdir -p /opt/paylanka-nano
-          cat > /opt/paylanka-nano/docker-compose.yml <<EOF
-version: "3.9"
+            # Use DOUBLE-QUOTED block so ${API_IMG}/${WEB_IMG} expand here on Jenkins
+            ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=accept-new "\$SSH_USER@${APP_HOST}" bash -lc "
+              set -e
+              sudo mkdir -p /opt/paylanka-nano
+              cat > /opt/paylanka-nano/docker-compose.yml <<EOF
+version: \\"3.9\\"
 services:
   api:
     image: ${API_IMG}:latest
     container_name: paylanka-nano-api-1
-    ports: ["8000:8000"]
+    ports: [\\"8000:8000\\"]
     healthcheck:
-      test: ["CMD-SHELL","wget -qO- http://localhost:8000/health || exit 1"]
+      test: [\\"CMD-SHELL\\", \\"wget -qO- http://localhost:8000/health || exit 1\\"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -81,26 +78,26 @@ services:
     depends_on:
       api:
         condition: service_healthy
-    ports: ["80:80"]
+    ports: [\\"80:80\\"]
 EOF
-          echo "${DH_PASS}" | sudo docker login -u "${DH_USER}" --password-stdin
-          sudo docker compose -f /opt/paylanka-nano/docker-compose.yml pull
-          sudo docker compose -f /opt/paylanka-nano/docker-compose.yml up -d
-          curl -fsS http://localhost/api/health
-        '
-      '''
+              echo \\"${'$'}{DH_PASS}\\" | sudo docker login -u \\"${'$'}{DH_USER}\\" --password-stdin
+              sudo docker compose -f /opt/paylanka-nano/docker-compose.yml pull
+              sudo docker compose -f /opt/paylanka-nano/docker-compose.yml up -d
+              curl -fsS http://localhost/api/health
+            "
+          """
+        }
+      }
     }
-  }
-}
 
-stage('Health Check (from Jenkins)') {
-  steps {
-    withCredentials([sshUserPrivateKey(credentialsId: 'appvm-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
-      sh 'ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new "$SSH_USER@${APP_HOST}" "curl -fsS http://localhost/api/health"'
+    stage('Health Check (from Jenkins)') {
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'appvm-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
+          sh 'ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new "$SSH_USER@${APP_HOST}" "curl -fsS http://localhost/api/health"'
+        }
+      }
     }
-  }
-}
-
+  } // <-- end stages
 
   post {
     success { echo "✅ Deployment successful! Visit: http://${APP_HOST}" }
