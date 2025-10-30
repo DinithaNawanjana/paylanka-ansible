@@ -2,6 +2,12 @@ pipeline {
   agent any
   options { timestamps(); ansiColor('xterm') }
 
+options {
+  timestamps()
+  ansiColor('xterm')
+  shell('/bin/bash')
+}
+
   environment {
     DOCKER_USER = 'dinithan'
     API_IMG     = "${DOCKER_USER}/paylanka-nano-api"
