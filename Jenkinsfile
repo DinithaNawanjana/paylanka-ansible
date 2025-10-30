@@ -1,9 +1,6 @@
 pipeline {
   agent any
-  options {
-    timestamps()
-    ansiColor('xterm')
-  }
+  options { timestamps(); ansiColor('xterm') }
 
   environment {
     DOCKER_USER = 'dinithan'
@@ -23,7 +20,9 @@ pipeline {
     stage('Docker Build + Tag') {
       steps {
         script { env.TAG = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim() }
-        sh '''bash -eo pipefail <<'BASH'
+        // No creds here → keep a single-quoted heredoc and set options inside
+        sh '''bash <<'BASH'
+set -euo pipefail
 docker build -t ${API_IMG}:${TAG} -t ${API_IMG}:latest services/api
 docker build -t ${WEB_IMG}:${TAG} -t ${WEB_IMG}:latest services/web
 BASH
@@ -34,11 +33,14 @@ BASH
     stage('Docker Push') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
-          // Use single-quoted Groovy string to avoid GString interpolation warnings
-          sh '''bash -eo pipefail <<'BASH'
+          // Needs $DH_* → use UNQUOTED heredoc so bash expands env vars at runtime
+          sh '''bash <<BASH
+set -euo pipefail
+: "\${DH_USER:?missing}"   # fail clearly if not injected
+: "\${DH_PASS:?missing}"
 echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin
-docker push ${API_IMG}:${TAG}    && docker push ${API_IMG}:latest
-docker push ${WEB_IMG}:${TAG}    && docker push ${WEB_IMG}:latest
+docker push ${API_IMG}:${TAG} && docker push ${API_IMG}:latest
+docker push ${WEB_IMG}:${TAG} && docker push ${WEB_IMG}:latest
 docker logout || true
 BASH
 '''
@@ -48,9 +50,9 @@ BASH
 
     stage('SSH Smoke Test') {
       steps {
-        // Load appvm-ssh-key into ssh-agent; do NOT pass -i or the raw key to sh
         sshagent(credentials: ['appvm-ssh-key']) {
-          sh '''bash -eo pipefail <<'BASH'
+          sh '''bash <<'BASH'
+set -euo pipefail
 ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
   "${APP_USER}@${APP_HOST}" "echo OK && whoami && hostname"
 BASH
@@ -61,44 +63,44 @@ BASH
 
     stage('Deploy to App VM') {
       steps {
-        withCredentials([usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
+        withCredentials([
+          usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')
+        ]) {
           sshagent(credentials: ['appvm-ssh-key']) {
-            sh '''bash -eo pipefail <<'BASH'
-# Build compose locally so env vars expand here on Jenkins
+            // Needs $DH_* → UNQUOTED heredoc
+            sh '''bash <<BASH
+set -euo pipefail
+
+# Build compose locally so env vars expand here
 cat > docker-compose.yml <<EOF
 version: "3.9"
 services:
   api:
     image: ${API_IMG}:${TAG}
     container_name: paylanka-nano-api-1
-    ports:
-      - "8000:8000"
+    ports: ["8000:8000"]
     healthcheck:
       test: ["CMD-SHELL","wget -qO- http://localhost:8000/health || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 20
-
   web:
     image: ${WEB_IMG}:${TAG}
     container_name: paylanka-nano-web-1
     depends_on:
       api:
         condition: service_healthy
-    ports:
-      - "80:80"
+    ports: ["80:80"]
 EOF
 
-# Copy compose to VM (uses ssh-agent key)
-scp -o StrictHostKeyChecking=accept-new \
-    docker-compose.yml "${APP_USER}@${APP_HOST}:/tmp/docker-compose.yml"
+scp -o StrictHostKeyChecking=accept-new docker-compose.yml "${APP_USER}@${APP_HOST}:/tmp/docker-compose.yml"
 
-# Deploy remotely (sudo in case ubuntu isn't in docker group)
 ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-    "${APP_USER}@${APP_HOST}" bash -lc '
+  "${APP_USER}@${APP_HOST}" bash -lc '
   set -euo pipefail
   sudo mkdir -p /opt/paylanka-nano
   sudo mv /tmp/docker-compose.yml /opt/paylanka-nano/docker-compose.yml
+  : "${DH_USER:?missing}"; : "${DH_PASS:?missing}"
   echo "${DH_PASS}" | sudo docker login -u "${DH_USER}" --password-stdin
   sudo docker compose -f /opt/paylanka-nano/docker-compose.yml pull
   sudo docker compose -f /opt/paylanka-nano/docker-compose.yml up -d
@@ -114,7 +116,8 @@ BASH
     stage('Health Check (from Jenkins)') {
       steps {
         sshagent(credentials: ['appvm-ssh-key']) {
-          sh '''bash -eo pipefail <<'BASH'
+          sh '''bash <<'BASH'
+set -euo pipefail
 ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
   "${APP_USER}@${APP_HOST}" "curl -fsS http://localhost/api/health || curl -fsS http://localhost:8000/health"
 BASH
