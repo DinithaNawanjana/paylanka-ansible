@@ -1,134 +1,39 @@
-pipeline {
+﻿pipeline {
   agent any
-  options { timestamps(); ansiColor('xterm') }
-
-  environment {
-    DOCKER_USER = 'dinithan'
-    API_IMG     = "${DOCKER_USER}/paylanka-nano-api"
-    WEB_IMG     = "${DOCKER_USER}/paylanka-nano-web"
-    APP_HOST    = '172.31.9.216'
-    APP_USER    = 'ubuntu'
+  options { timestamps() }
+  parameters {
+    string(name: 'APP_HOST', defaultValue: '', description: 'App VM IP (overrides inventory if set)')
+    string(name: 'API_IMAGE', defaultValue: 'dinithan/paylanka-nano-api:latest', description: 'API image:tag')
+    string(name: 'WEB_IMAGE', defaultValue: 'dinithan/paylanka-nano-web:latest', description: 'WEB image:tag')
+    string(name: 'DB_HOST', defaultValue: 'RDS_ENDPOINT_OR_LOCALHOST', description: 'DB host')
+    string(name: 'DB_USER', defaultValue: 'postgres', description: 'DB user')
+    password(name: 'DB_PASSWORD', defaultValue: 'postgres', description: 'DB password')
+    string(name: 'DB_NAME', defaultValue: 'paylanka', description: 'DB name')
+    string(name: 'API_PORT', defaultValue: '8000', description: 'API host port')
+    string(name: 'WEB_PORT', defaultValue: '80', description: 'WEB host port')
   }
-
+  environment { SSH_KEY_ID = 'appvm-ssh' }
   stages {
-    stage('Checkout') {
+    stage('Checkout'){ steps { checkout scm } }
+    stage('Deploy with Ansible') {
       steps {
-        git branch: 'main', url: 'https://github.com/DinithaNawanjana/paylanka-nano.git'
-      }
-    }
-
-    stage('Docker Build + Tag') {
-      steps {
-        script { env.TAG = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim() }
-        // No creds here → keep a single-quoted heredoc and set options inside
-        sh '''bash <<'BASH'
-set -euo pipefail
-docker build -t ${API_IMG}:${TAG} -t ${API_IMG}:latest services/api
-docker build -t ${WEB_IMG}:${TAG} -t ${WEB_IMG}:latest services/web
-BASH
-'''
-      }
-    }
-
-    stage('Docker Push') {
-      steps {
-        withCredentials([usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
-          // Needs $DH_* → use UNQUOTED heredoc so bash expands env vars at runtime
-          sh '''bash <<BASH
-set -euo pipefail
-: "\${DH_USER:?missing}"   # fail clearly if not injected
-: "\${DH_PASS:?missing}"
-echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin
-docker push ${API_IMG}:${TAG} && docker push ${API_IMG}:latest
-docker push ${WEB_IMG}:${TAG} && docker push ${WEB_IMG}:latest
-docker logout || true
-BASH
-'''
+        withCredentials([sshUserPrivateKey(credentialsId: env.SSH_KEY_ID, keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
+          sh '''
+            set -euo pipefail
+            sudo apt-get update -y && sudo apt-get install -y ansible
+            if [ -n "" ]; then
+              echo "[app]" > infra/ansible/inventory.override.ini
+              echo "appvm ansible_host= ansible_user=" >> infra/ansible/inventory.override.ini
+              INV="infra/ansible/inventory.override.ini"
+            else
+              INV="infra/ansible/inventory.ini"
+            fi
+            ansible-playbook -i "" infra/ansible/deploy.yml \
+              --private-key "" \
+              --extra-vars "docker_api_image= docker_web_image= api_port= web_port= env_vars={'DB_HOST':'','DB_PORT':'5432','DB_USER':'','DB_PASSWORD':'','DB_NAME':'','NODE_ENV':'production','API_BASE_URL':'http://localhost:'}"
+          '''
         }
       }
     }
-
-    stage('SSH Smoke Test') {
-      steps {
-        sshagent(credentials: ['appvm-ssh-key']) {
-          sh '''bash <<'BASH'
-set -euo pipefail
-ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-  "${APP_USER}@${APP_HOST}" "echo OK && whoami && hostname"
-BASH
-'''
-        }
-      }
-    }
-
-    stage('Deploy to App VM') {
-      steps {
-        withCredentials([
-          usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')
-        ]) {
-          sshagent(credentials: ['appvm-ssh-key']) {
-            // Needs $DH_* → UNQUOTED heredoc
-            sh '''bash <<BASH
-set -euo pipefail
-
-# Build compose locally so env vars expand here
-cat > docker-compose.yml <<EOF
-version: "3.9"
-services:
-  api:
-    image: ${API_IMG}:${TAG}
-    container_name: paylanka-nano-api-1
-    ports: ["8000:8000"]
-    healthcheck:
-      test: ["CMD-SHELL","wget -qO- http://localhost:8000/health || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-  web:
-    image: ${WEB_IMG}:${TAG}
-    container_name: paylanka-nano-web-1
-    depends_on:
-      api:
-        condition: service_healthy
-    ports: ["80:80"]
-EOF
-
-scp -o StrictHostKeyChecking=accept-new docker-compose.yml "${APP_USER}@${APP_HOST}:/tmp/docker-compose.yml"
-
-ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-  "${APP_USER}@${APP_HOST}" bash -lc '
-  set -euo pipefail
-  sudo mkdir -p /opt/paylanka-nano
-  sudo mv /tmp/docker-compose.yml /opt/paylanka-nano/docker-compose.yml
-  : "${DH_USER:?missing}"; : "${DH_PASS:?missing}"
-  echo "${DH_PASS}" | sudo docker login -u "${DH_USER}" --password-stdin
-  sudo docker compose -f /opt/paylanka-nano/docker-compose.yml pull
-  sudo docker compose -f /opt/paylanka-nano/docker-compose.yml up -d
-  curl -fsS http://localhost/api/health || curl -fsS http://localhost:8000/health
-'
-BASH
-'''
-          }
-        }
-      }
-    }
-
-    stage('Health Check (from Jenkins)') {
-      steps {
-        sshagent(credentials: ['appvm-ssh-key']) {
-          sh '''bash <<'BASH'
-set -euo pipefail
-ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-  "${APP_USER}@${APP_HOST}" "curl -fsS http://localhost/api/health || curl -fsS http://localhost:8000/health"
-BASH
-'''
-        }
-      }
-    }
-  }
-
-  post {
-    success { echo "✅ Deployment successful! Visit: http://${APP_HOST}" }
-    failure { echo "❌ Build failed — check the stage logs above." }
   }
 }
