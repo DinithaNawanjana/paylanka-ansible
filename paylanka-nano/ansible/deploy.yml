@@ -1,0 +1,5 @@
+---
+- name: Deploy PayLanka stack
+  hosts: app
+  roles:
+    - app

@@ -1,0 +1,49 @@
+---
+- name: Ensure Docker Engine and Compose plugin installed
+  become: yes
+  apt:
+    name: [docker.io, docker-compose-plugin, curl]
+    state: present
+    update_cache: yes
+
+- name: Create /opt/paylanka directory
+  become: yes
+  file:
+    path: /opt/paylanka
+    state: directory
+    mode: "0755"
+
+- name: Render .env
+  become: yes
+  template:
+    src: ".env.j2"
+    dest: "/opt/paylanka/.env"
+    mode: "0640"
+
+- name: Render docker-compose.yml
+  become: yes
+  template:
+    src: "docker-compose.yml.j2"
+    dest: "/opt/paylanka/docker-compose.yml"
+    mode: "0644"
+
+- name: Pull latest Docker images
+  become: yes
+  command: docker compose pull
+  args:
+    chdir: /opt/paylanka
+
+- name: Start/Update application stack
+  become: yes
+  command: docker compose up -d
+  args:
+    chdir: /opt/paylanka
+
+- name: Display running containers
+  become: yes
+  command: docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Ports}}"
+  register: containers
+  changed_when: false
+
+- debug:
+    var: containers.stdout_lines

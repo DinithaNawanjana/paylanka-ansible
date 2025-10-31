@@ -1,39 +1,94 @@
 ﻿pipeline {
   agent any
-  options { timestamps() }
-  parameters {
-    string(name: 'APP_HOST', defaultValue: '', description: 'App VM IP (overrides inventory if set)')
-    string(name: 'API_IMAGE', defaultValue: 'dinithan/paylanka-nano-api:latest', description: 'API image:tag')
-    string(name: 'WEB_IMAGE', defaultValue: 'dinithan/paylanka-nano-web:latest', description: 'WEB image:tag')
-    string(name: 'DB_HOST', defaultValue: 'RDS_ENDPOINT_OR_LOCALHOST', description: 'DB host')
-    string(name: 'DB_USER', defaultValue: 'postgres', description: 'DB user')
-    password(name: 'DB_PASSWORD', defaultValue: 'postgres', description: 'DB password')
-    string(name: 'DB_NAME', defaultValue: 'paylanka', description: 'DB name')
-    string(name: 'API_PORT', defaultValue: '8000', description: 'API host port')
-    string(name: 'WEB_PORT', defaultValue: '80', description: 'WEB host port')
+  options { timestamps(); ansiColor('xterm'); skipDefaultCheckout() }
+
+  environment {
+    DOCKERHUB_CREDS = 'docker-hub'            // Jenkins creds: username/password
+    DOCKER_USER     = 'dinithan'
+    API_IMG         = "${DOCKER_USER}/paylanka-nano-api"
+    WEB_IMG         = "${DOCKER_USER}/paylanka-nano-web"
+    MAIN_BRANCH     = 'main'
+    // For triggering CD
+    GH_PAT_CRED     = 'github-pat'            // Jenkins secret text: PAT with repo/workflow scopes
+    CD_OWNER        = 'DinithaNawanjana'      // your GitHub user/org
+    CD_REPO         = 'paylanka-ansible'      // infra/deploy repo
+    CD_WORKFLOW     = 'deploy.yml'            // Actions workflow filename in paylanka-ansible
   }
-  environment { SSH_KEY_ID = 'appvm-ssh' }
+
   stages {
-    stage('Checkout'){ steps { checkout scm } }
-    stage('Deploy with Ansible') {
+    stage('Checkout') {
       steps {
-        withCredentials([sshUserPrivateKey(credentialsId: env.SSH_KEY_ID, keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
-          sh '''
-            set -euo pipefail
-            sudo apt-get update -y && sudo apt-get install -y ansible
-            if [ -n "" ]; then
-              echo "[app]" > infra/ansible/inventory.override.ini
-              echo "appvm ansible_host= ansible_user=" >> infra/ansible/inventory.override.ini
-              INV="infra/ansible/inventory.override.ini"
-            else
-              INV="infra/ansible/inventory.ini"
-            fi
-            ansible-playbook -i "" infra/ansible/deploy.yml \
-              --private-key "" \
-              --extra-vars "docker_api_image= docker_web_image= api_port= web_port= env_vars={'DB_HOST':'','DB_PORT':'5432','DB_USER':'','DB_PASSWORD':'','DB_NAME':'','NODE_ENV':'production','API_BASE_URL':'http://localhost:'}"
-          '''
+        git branch: "${env.MAIN_BRANCH}",
+            url: 'https://github.com/DinithaNawanjana/paylanka-nano.git',
+            credentialsId: 'github-https'     // or remove if public
+      }
+    }
+
+    stage('Compute Tag') {
+      steps {
+        script {
+          env.SHORT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          env.BUILD_TAG = "${SHORT_SHA}"
         }
       }
     }
+
+    stage('Build & Test') {
+      steps {
+        sh '''bash <<'BASH'
+set -euo pipefail
+# build
+docker build -t ${API_IMG}:${BUILD_TAG} -t ${API_IMG}:latest services/api
+docker build -t ${WEB_IMG}:${BUILD_TAG} -t ${WEB_IMG}:latest services/web
+
+# (optional) quick API container test
+docker run --rm -d --name t_api -p 18000:8000 ${API_IMG}:${BUILD_TAG}
+for i in {1..30}; do curl -fsS http://127.0.0.1:18000/health && ok=1 && break || sleep 1; done
+docker rm -f t_api >/dev/null 2>&1 || true
+[ "${ok:-}" = "1" ]
+BASH
+'''
+      }
+    }
+
+    stage('Login & Push') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: "${DOCKERHUB_CREDS}", usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
+          sh '''bash <<BASH
+set -euo pipefail
+echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin
+docker push ${API_IMG}:${BUILD_TAG}
+docker push ${API_IMG}:latest
+docker push ${WEB_IMG}:${BUILD_TAG}
+docker push ${WEB_IMG}:latest
+docker logout || true
+BASH
+'''
+        }
+      }
+    }
+
+    stage('Trigger CD (GitHub Actions)') {
+      when { branch 'main' }
+      steps {
+        withCredentials([string(credentialsId: "${GH_PAT_CRED}", variable: 'GH_PAT')]) {
+          sh '''bash <<BASH
+set -euo pipefail
+# Trigger Actions workflow_dispatch and pass tag to deploy
+curl -sS -X POST \
+  -H "Accept: application/vnd.github+json" \
+  -H "Authorization: Bearer ${GH_PAT}" \
+  https://api.github.com/repos/${CD_OWNER}/${CD_REPO}/actions/workflows/${CD_WORKFLOW}/dispatches \
+  -d "{\"ref\":\"main\",\"inputs\":{\"image_tag\":\"${BUILD_TAG}\"}}" | cat
+BASH
+'''
+        }
+      }
+    }
+  }
+
+  post {
+    success { echo "✅ CI done. Images: ${API_IMG}:${BUILD_TAG}, ${WEB_IMG}:${BUILD_TAG}. CD triggered." }
+    failure { echo "❌ CI failed. See logs." }
   }
 }
